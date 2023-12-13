@@ -1,4 +1,3 @@
-#include <Arduino_FreeRTOS.h>
 #include <Wire.h>
 #include <vector>
 
@@ -18,15 +17,16 @@ char pass[] = "2fR129>5";
 
 float kWh = 0;
 volatile bool faultDetected = false;
-int ledPin = 2;
+int ledPin = LED_BUILTIN; 
 const float HIGH_VOLTAGE_THRESHOLD = 230.0; 
+const float MAX_CURRENT_THRESHOLD = 10.0; 
+
 std::vector<float> voltageBuffer;
 std::vector<float> currentBuffer;
 
 void handleFault() {
   // Simulate sending an alert
   Serial.println("ALERT: High voltage detected!");
-
   digitalWrite(ledPin, HIGH); // Turn on LED for visual indication
 }
 
@@ -44,6 +44,18 @@ float calculateMovingAverage(std::vector<float>& buffer) {
     sum += value;
   }
   return sum / buffer.size();
+}
+
+void checkAndResetFault() {
+  // Check if a fault was previously detected
+  if (faultDetected) {
+    // Check if voltage and current are within normal ranges
+    if (emon.Vrms <= HIGH_VOLTAGE_THRESHOLD && emon.Irms <= MAX_CURRENT_THRESHOLD) {
+      // Voltage and current are normal, reset the fault
+      faultDetected = false;
+      digitalWrite(ledPin, LOW);  // Turn off LED
+    }
+  }
 }
 
 void currentTask(void *parameter) {
@@ -121,6 +133,9 @@ void powerCalculationTask(void *parameter) {
     Blynk.virtualWrite(V0, avgCurrent);
     Blynk.virtualWrite(V3, kWh);
 
+    // Check and reset faults
+    checkAndResetFault();
+
     vTaskDelay(1000 / portTICK_PERIOD_MS); // Delay for 1 second
   }
 }
@@ -156,4 +171,5 @@ void setup() {
 void loop() {
   Blynk.run();
   timer.run();
+  checkAndResetFault();  // Check and reset faults in the loop
 }
