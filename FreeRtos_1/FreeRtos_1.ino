@@ -1,4 +1,3 @@
-#include <Arduino_FreeRTOS.h>
 #include <Wire.h>
 #include <vector>
 
