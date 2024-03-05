@@ -13,6 +13,8 @@ BlynkTimer timer;
 char auth[] = "DUDgpXIBc8JMH3-K3RHAQs7-Vq0U6ITs";
 char ssid[] = "DESKTOP-D6BKAJV 1575";
 char pass[] = "2fR129>5";
+const float HIGH_VOLTAGE_THRESHOLD = 230.0;   // Set your desired high voltage threshold
+const float MAX_CURRENT_THRESHOLD = 10.0;     // Set your desired maximum current threshold
 
 float kWh = 0;
 unsigned long lastmillis = millis();
@@ -34,12 +36,22 @@ void handleCurrentFault() {
   // Additional actions if needed
 }
 
-void currentTask(void *parameter) {
+void voltageTask(void *parameter) {
   for (;;) {
+    // Read voltage sensor value here
     emon.calcVI(20, 2000);
-    Serial.print("\tIrms: ");
-    Serial.print(emon.Irms, 4);
-    Serial.print("A");
+    Serial.print("Vrms: ");
+    Serial.print(emon.Vrms, 2);
+    Serial.print("V");
+
+    // Check for high voltage condition
+    if (emon.Vrms > HIGH_VOLTAGE_THRESHOLD) {
+      handleVoltageFault();  // Call fault handling function
+    }
+    else if (faultDetected) {
+      faultDetected = false;
+      // Voltage has returned to normal, turn off LED or take other actions
+    }
 
     // Notify the power calculation task
     xTaskNotify(powerCalculationTaskHandle, 1, eNoAction);
@@ -48,13 +60,21 @@ void currentTask(void *parameter) {
   }
 }
 
-void voltageTask(void *parameter) {
+void currentTask(void *parameter) {
   for (;;) {
-    // Read voltage sensor value here
     emon.calcVI(20, 2000);
-    Serial.print("Vrms: ");
-    Serial.print(emon.Vrms, 2);
-    Serial.print("V");
+    Serial.print("\tIrms: ");
+    Serial.print(emon.Irms, 4);
+    Serial.print("A");
+
+    // Check for high current condition
+    if (emon.Irms > MAX_CURRENT_THRESHOLD) {
+      handleCurrentFault();  // Call fault handling function
+    }
+    else if (faultDetected) {
+      faultDetected = false;
+      // Current has returned to normal, turn off LED or take other actions
+    }
 
     // Notify the power calculation task
     xTaskNotify(powerCalculationTaskHandle, 1, eNoAction);
