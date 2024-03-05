@@ -22,6 +22,18 @@ TaskHandle_t voltageTaskHandle = NULL;
 TaskHandle_t powerCalculationTaskHandle = NULL;
 TaskHandle_t blynkTaskHandle = NULL;
 
+void handleVoltageFault() {
+  // Handle high voltage fault
+  Serial.println("ALERT: High voltage detected!");
+  // Additional actions if needed
+}
+
+void handleCurrentFault() {
+  // Handle high current fault
+  Serial.println("ALERT: High current detected!");
+  // Additional actions if needed
+}
+
 void currentTask(void *parameter) {
   for (;;) {
     emon.calcVI(20, 2000);
@@ -84,6 +96,12 @@ void setup() {
   emon.current(34, currCalibration);   // Current: input pin, calibration.
   Blynk.begin(auth, ssid, pass);
 
+  pinMode(ledPin, OUTPUT);
+
+  // Attach interrupt handlers
+  attachInterrupt(digitalPinToInterrupt(34), handleCurrentFault, RISING);
+  attachInterrupt(digitalPinToInterrupt(35), handleVoltageFault, RISING);
+
   xTaskCreate(currentTask, "CurrentTask", 10000, NULL, 4, &currentTaskHandle);
   xTaskCreate(voltageTask, "VoltageTask", 10000, NULL, 3, &voltageTaskHandle);
   xTaskCreate(powerCalculationTask, "PowerCalculationTask", 10000, NULL, 2, &powerCalculationTaskHandle);
@@ -93,4 +111,5 @@ void setup() {
 void loop() {
   Blynk.run();
   timer.run();
+  checkAndResetFault();  // Check and reset faults in the loop
 }
