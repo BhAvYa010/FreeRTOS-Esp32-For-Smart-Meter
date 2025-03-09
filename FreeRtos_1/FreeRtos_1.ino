@@ -1,135 +1,108 @@
 #include <Wire.h>
-
 #define BLYNK_PRINT Serial
 #include "EmonLib.h"
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <BlynkSimpleEsp32.h>
+
 EnergyMonitor emon;
 #define vCalibration 106.8
 #define currCalibration 0.52
-BlynkTimer timer;
 
-char auth[] = "DUDgpXIBc8JMH3-K3RHAQs7-Vq0U6ITs";
-char ssid[] = "DESKTOP-D6BKAJV 1575";
-char pass[] = "2fR129>5";
-const float HIGH_VOLTAGE_THRESHOLD = 230.0;   // Set your desired high voltage threshold
-const float MAX_CURRENT_THRESHOLD = 10.0;     // Set your desired maximum current threshold
-
+// Fixed missing declarations
+const int ledPin = 2;               // ESP32 built-in LED
+volatile bool voltageFault = false; // Atomic flag for ISRs
+volatile bool currentFault = false; 
 float kWh = 0;
-unsigned long lastmillis = millis();
+unsigned long lastmillis = 0;
 
-TaskHandle_t currentTaskHandle = NULL;
-TaskHandle_t voltageTaskHandle = NULL;
-TaskHandle_t powerCalculationTaskHandle = NULL;
-TaskHandle_t blynkTaskHandle = NULL;
+// Blynk credentials (replace with yours)
+char auth[] = "your_auth_token";
+char ssid[] = "your_SSID";
+char pass[] = "your_password";
 
-void handleVoltageFault() {
-  // Handle high voltage fault
-  Serial.println("ALERT: High voltage detected!");
-  // Additional actions if needed
+// Thresholds
+const float HIGH_VOLTAGE = 230.0;
+const float MAX_CURRENT = 10.0;
+
+// FreeRTOS handles & mutex
+TaskHandle_t sensorTaskHandle, blynkTaskHandle;
+SemaphoreHandle_t energyMutex;
+
+void IRAM_ATTR handleVoltageFault() {
+  voltageFault = true;  // Atomic write
 }
 
-void handleCurrentFault() {
-  // Handle high current fault
-  Serial.println("ALERT: High current detected!");
-  // Additional actions if needed
+void IRAM_ATTR handleCurrentFault() {
+  currentFault = true;
 }
 
-void voltageTask(void *parameter) {
-  for (;;) {
-    // Read voltage sensor value here
-    emon.calcVI(20, 2000);
-    Serial.print("Vrms: ");
-    Serial.print(emon.Vrms, 2);
-    Serial.print("V");
-
-    // Check for high voltage condition
-    if (emon.Vrms > HIGH_VOLTAGE_THRESHOLD) {
-      handleVoltageFault();  // Call fault handling function
-    }
-    else if (faultDetected) {
-      faultDetected = false;
-      // Voltage has returned to normal, turn off LED or take other actions
-    }
-
-    // Notify the power calculation task
-    xTaskNotify(powerCalculationTaskHandle, 1, eNoAction);
+void sensorTask(void *pvParam) {  // Combined sensor task
+  for(;;) {
+    // Take measurement
+    emon.calcVI(20, 2000);  // 20 crossings, 2000ms timeout
     
-    vTaskDelay(1000 / portTICK_PERIOD_MS); // Delay for 1 second
-  }
-}
-
-void currentTask(void *parameter) {
-  for (;;) {
-    emon.calcVI(20, 2000);
-    Serial.print("\tIrms: ");
-    Serial.print(emon.Irms, 4);
-    Serial.print("A");
-
-    // Check for high current condition
-    if (emon.Irms > MAX_CURRENT_THRESHOLD) {
-      handleCurrentFault();  // Call fault handling function
-    }
-    else if (faultDetected) {
-      faultDetected = false;
-      // Current has returned to normal, turn off LED or take other actions
+    // Get exclusive access to energy data
+    if(xSemaphoreTake(energyMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      kWh += emon.apparentPower * (millis() - lastmillis) / 3600000000.0;
+      lastmillis = millis();
+      xSemaphoreGive(energyMutex);
     }
 
-    // Notify the power calculation task
-    xTaskNotify(powerCalculationTaskHandle, 1, eNoAction);
+    // Check faults
+    if(emon.Vrms > HIGH_VOLTAGE) {
+      handleVoltageFault();
+      digitalWrite(ledPin, HIGH);
+    }
+    if(emon.Irms > MAX_CURRENT) {
+      handleCurrentFault();
+      digitalWrite(ledPin, HIGH);
+    }
     
-    vTaskDelay(1000 / portTICK_PERIOD_MS); // Delay for 1 second
+    vTaskDelay(pdMS_TO_TICKS(1000));  // 1s delay
   }
 }
 
-void powerCalculationTask(void *parameter) {
-  for (;;) {
-    // Wait for notifications from current and voltage tasks
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
-    // Calculate power here
-    Serial.print("\tkWh: ");
-    kWh = kWh + emon.apparentPower * (millis() - lastmillis) / 3600000000.0;
-    Serial.print(kWh, 4);
-    Serial.println("kWh");
-    lastmillis = millis();
-
-    vTaskDelay(1000 / portTICK_PERIOD_MS); // Delay for 1 second
+void blynkTask(void *pvParam) {
+  Blynk.begin(auth, ssid, pass);  // Blocking connection
+  
+  for(;;) {
+    if(Blynk.connected()) {
+      if(xSemaphoreTake(energyMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        Blynk.virtualWrite(V0, emon.Vrms);
+        Blynk.virtualWrite(V1, emon.Irms); 
+        Blynk.virtualWrite(V2, kWh);
+        xSemaphoreGive(energyMutex);
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(5000));  // 5s update
   }
 }
 
-void blynkTask(void *parameter) {
-  for (;;) {
-    // Send data to Blynk here
-    Blynk.virtualWrite(V1, emon.Vrms);
-    Blynk.virtualWrite(V0, emon.Irms);
-    Blynk.virtualWrite(V3, kWh);
-    vTaskDelay(5000 / portTICK_PERIOD_MS); // Delay for 5 seconds
+void checkFaults() {  // Central fault handler
+  if(voltageFault || currentFault) {
+    Serial.printf("FAULT! V:%.1fV I:%.3fA\n", emon.Vrms, emon.Irms);
+    voltageFault = currentFault = false;
+    digitalWrite(ledPin, LOW);
   }
 }
 
 void setup() {
-  Serial.begin(9600);
-  emon.voltage(35, vCalibration, 1.7); // Voltage: input pin, calibration, phase_shift
-  emon.current(34, currCalibration);   // Current: input pin, calibration.
-  Blynk.begin(auth, ssid, pass);
-
+  Serial.begin(115200);
   pinMode(ledPin, OUTPUT);
+  
+  // Initialize energy monitor
+  emon.voltage(35, vCalibration, 1.7);  // Voltage pin
+  emon.current(34, currCalibration);    // Current pin
 
-  // Attach interrupt handlers
-  attachInterrupt(digitalPinToInterrupt(34), handleCurrentFault, RISING);
-  attachInterrupt(digitalPinToInterrupt(35), handleVoltageFault, RISING);
-
-  xTaskCreate(currentTask, "CurrentTask", 10000, NULL, 4, &currentTaskHandle);
-  xTaskCreate(voltageTask, "VoltageTask", 10000, NULL, 3, &voltageTaskHandle);
-  xTaskCreate(powerCalculationTask, "PowerCalculationTask", 10000, NULL, 2, &powerCalculationTaskHandle);
-  xTaskCreate(blynkTask, "BlynkTask", 10000, NULL, 1, &blynkTaskHandle);
+  // Create mutex before tasks
+  energyMutex = xSemaphoreCreateMutex();
+  
+  // Create tasks with safe stack sizes
+  xTaskCreate(sensorTask, "Sensors", 4096, NULL, 2, &sensorTaskHandle);
+  xTaskCreate(blynkTask, "Blynk", 8192, NULL, 1, &blynkTaskHandle);
 }
 
 void loop() {
-  Blynk.run();
-  timer.run();
-  checkAndResetFault();  // Check and reset faults in the loop
+  checkFaults();  // Handle faults in main loop
 }
